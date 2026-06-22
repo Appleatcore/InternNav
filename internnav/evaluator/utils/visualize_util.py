@@ -4,6 +4,8 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+import numpy as np
+
 from internnav import PROJECT_ROOT_PATH
 from internnav.evaluator.utils.common import images_to_video, obs_to_image
 
@@ -20,6 +22,25 @@ except Exception:
 
 viz_logger = logging.getLogger("visualize_util")
 viz_logger.setLevel(logging.INFO)
+
+
+def _copy_viz_obs(obs: Optional[Dict]) -> Optional[Dict]:
+    if obs is None:
+        return None
+
+    keep_keys = ("rgb", "topdown_rgb", "globalgps", "globalrotation")
+    copied = {}
+    for key in keep_keys:
+        if key not in obs:
+            continue
+        value = obs[key]
+        if isinstance(value, np.ndarray):
+            copied[key] = value.copy()
+        elif hasattr(value, "copy"):
+            copied[key] = value.copy()
+        else:
+            copied[key] = value
+    return copied
 
 
 @dataclass
@@ -123,8 +144,9 @@ class VisualizeUtil:
             step_index = ti.frame_count
 
         ti.frame_count += 1
-        if ti.saved_frames is not None:
-            ti.saved_frames.append(obs)
+        viz_obs = _copy_viz_obs(obs)
+        if ti.saved_frames is not None and viz_obs is not None:
+            ti.saved_frames.append(viz_obs)
 
         # zero-padded name for lexicographic order
         fname = filename or f"{step_index:06d}.{self.img_ext}"

@@ -11,6 +11,7 @@ class BasePathKeyEpisodeloader:
         filter_same_trajectory,
         revise_data=True,
         filter_stairs=True,
+        selected_scans=None,
         rank=0,
         world_size=1,
     ):
@@ -23,6 +24,9 @@ class BasePathKeyEpisodeloader:
         self.path_key_data = {}
         self.path_key_scan = {}
         self.path_key_split = {}
+        if isinstance(selected_scans, str):
+            selected_scans = [selected_scans]
+        selected_scans = set(selected_scans) if selected_scans is not None else None
 
         for split_data_type in split_data_types:
             load_data_map = load_data(
@@ -35,6 +39,8 @@ class BasePathKeyEpisodeloader:
                 world_size=world_size,
             )
             for scan, path_list in load_data_map.items():
+                if selected_scans is not None and scan not in selected_scans:
+                    continue
                 for path in path_list:
                     trajectory_id = path['trajectory_id']
 

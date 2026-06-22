@@ -1,5 +1,7 @@
 import copy
+import importlib.util
 import itertools
+import os
 import re
 from collections import OrderedDict
 from typing import Union
@@ -30,10 +32,14 @@ class InternVLAN1Net(PreTrainedModel):
         super().__init__(config)
         self.model_config = ModelCfg(**config.model_cfg['model'])
 
+        attn_implementation = os.environ.get("INTERNVLA_ATTN_IMPLEMENTATION")
+        if attn_implementation is None:
+            attn_implementation = "flash_attention_2" if importlib.util.find_spec("flash_attn") else "sdpa"
+
         self.model = InternVLAN1ForCausalLM.from_pretrained(
             self.model_config.model_path,
             torch_dtype=torch.bfloat16,
-            attn_implementation="flash_attention_2",
+            attn_implementation=attn_implementation,
             device_map={"": self.model_config.device},
         )
 

@@ -1,4 +1,5 @@
 import argparse
+import importlib.util
 import json
 import os
 import sys
@@ -53,6 +54,13 @@ MAX_STEPS = 8
 MAX_LOCAL_STEPS = 4
 
 
+def _resolve_attn_implementation() -> str:
+    requested = os.environ.get("INTERNVLA_ATTN_IMPLEMENTATION")
+    if requested:
+        return requested
+    return "flash_attention_2" if importlib.util.find_spec("flash_attn") else "sdpa"
+
+
 class action_code(IntEnum):
     STOP = 0
     FORWARD = 1
@@ -67,6 +75,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
     def __init__(self, cfg: EvalCfg):
         args = argparse.Namespace(**cfg.eval_settings)
         self.save_video = args.save_video
+        self.save_all_videos = bool(getattr(args, "save_all_videos", False))
         self.epoch = args.epoch
         self.max_steps_per_episode = args.max_steps_per_episode
         self.output_path = args.output_path
@@ -113,18 +122,19 @@ class HabitatVLNEvaluator(DistributedEvaluator):
         processor.tokenizer.padding_side = 'left'
 
         device = torch.device(f"cuda:{self.local_rank}")
+        attn_implementation = _resolve_attn_implementation()
         if self.model_args.mode == 'dual_system':
             model = InternVLAN1ForCausalLM.from_pretrained(
                 self.model_args.model_path,
                 torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
+                attn_implementation=attn_implementation,
                 device_map={"": device},
             )
         elif self.model_args.mode == 'system2':
             model = Qwen2_5_VLForConditionalGeneration.from_pretrained(
                 self.model_args.model_path,
                 torch_dtype=torch.bfloat16,
-                attn_implementation="flash_attention_2",
+                attn_implementation=attn_implementation,
                 device_map={"": device},
             )
         else:
@@ -606,7 +616,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
                 f.write(json.dumps(result) + "\n")
 
             # save video
-            if self.save_video and metrics['success'] == 1.0:
+            if self.save_video and (self.save_all_videos or metrics['success'] == 1.0):
                 images_to_video(
                     vis_frames,
                     os.path.join(self.output_path, f'vis_{self.epoch}', f'{scene_id}'),
@@ -922,7 +932,7 @@ class HabitatVLNEvaluator(DistributedEvaluator):
             os.makedirs(self.output_path, exist_ok=True)
             with open(os.path.join(self.output_path, 'progress.json'), 'a') as f:
                 f.write(json.dumps(result) + "\n")
-            if self.save_video and metrics['success'] == 1.0:
+            if self.save_video and (self.save_all_videos or metrics['success'] == 1.0):
                 images_to_video(
                     vis_frames,
                     os.path.join(self.output_path, f'vis_{self.epoch}', f'{scene_id}'),

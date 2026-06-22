@@ -20,6 +20,7 @@ class ResumablePathKeyEpisodeloader(BasePathKeyEpisodeloader):
         run_type,
         retry_list,
         filter_stairs,
+        selected_scans=None,
         rank=0,
         world_size=1,
     ):
@@ -32,6 +33,7 @@ class ResumablePathKeyEpisodeloader(BasePathKeyEpisodeloader):
             filter_same_trajectory=filter_same_trajectory,
             revise_data=True,
             filter_stairs=filter_stairs,
+            selected_scans=selected_scans,
             rank=rank,
             world_size=world_size,
         )

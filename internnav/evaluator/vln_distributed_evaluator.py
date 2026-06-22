@@ -94,6 +94,13 @@ class VLNDistributedEvaluator(DistributedEvaluator):
     def now_path_key(self, info):
         return info.data['path_key']
 
+    def instruction_text(self, info):
+        data = getattr(info, 'data', {}) or {}
+        instruction = data.get('instruction')
+        if isinstance(instruction, dict):
+            return instruction.get('instruction_text')
+        return instruction
+
     def _obs_remove_robot_name(self, obs):
         obs = [
             *map(
@@ -253,6 +260,7 @@ class VLNDistributedEvaluator(DistributedEvaluator):
             # start new trace log
             progress_log_multi_util.trace_start(
                 trajectory_id=self.now_path_key(reset_info),
+                instruction=self.instruction_text(reset_info),
             )
             # start new visualize log
             if self.vis_output:
@@ -273,6 +281,7 @@ class VLNDistributedEvaluator(DistributedEvaluator):
                 continue
             progress_log_multi_util.trace_start(
                 trajectory_id=self.now_path_key(info),
+                instruction=self.instruction_text(info),
             )
             if self.vis_output:
                 self.visualize_util.trace_start(

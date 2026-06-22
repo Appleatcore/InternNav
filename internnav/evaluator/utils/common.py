@@ -260,8 +260,11 @@ def draw_trajectory(array, obs_lst, reference_path):
     ax.axis("off")
     fig.tight_layout(pad=0)
     canvas.draw()
-    img = np.frombuffer(canvas.tostring_rgb(), dtype="uint8")
-    img = img.reshape(canvas.get_width_height()[::-1] + (3,))
+    if hasattr(canvas, "tostring_rgb"):
+        img = np.frombuffer(canvas.tostring_rgb(), dtype="uint8")
+        img = img.reshape(canvas.get_width_height()[::-1] + (3,))
+    else:
+        img = np.asarray(canvas.buffer_rgba(), dtype=np.uint8)[..., :3].copy()
     plt.close(fig)
     return img
 

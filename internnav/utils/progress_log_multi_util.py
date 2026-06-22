@@ -56,6 +56,15 @@ INITED = False
 FINISH_PATH_NUM = 0
 
 
+def _normalize_instruction(instruction):
+    if instruction is None:
+        return None
+    if not isinstance(instruction, str):
+        instruction = str(instruction)
+    instruction = ' '.join(instruction.split())
+    return instruction or None
+
+
 def init(dataset_name, path_count):
     global PROGRESS
     global INITED
@@ -87,7 +96,7 @@ def last_log(last_trajectory_id, step_count=-1):
     progress_logger_multi.info(f'{last_str}')
 
 
-def trace_start(trajectory_id):
+def trace_start(trajectory_id, instruction=None):
     global INITED  # noqa: F824
     if not INITED:
         return
@@ -105,6 +114,9 @@ def trace_start(trajectory_id):
     )
     PROGRESS.info_map[trajectory_id] = ti
     progress_logger_multi.info(f'start sampling trajectory_id: {trajectory_id}')
+    instruction = _normalize_instruction(instruction)
+    if instruction:
+        progress_logger_multi.info(f'task [{trajectory_id}]: {instruction}')
 
     LAST_TRAJECTORY_ID.add(trajectory_id)
 
