@@ -333,6 +333,29 @@ fall_path_z_0_3 = [
 ]
 
 skip_list = []
+skip_path_key_list = ['6926_1748', '5167_1329']
+
+
+def _read_skip_path_key_file(path):
+    path_keys = set()
+    if not path or not os.path.exists(path):
+        return path_keys
+
+    with open(path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.split('#', 1)[0].strip()
+            if not line:
+                continue
+            path_keys.update(item.strip() for item in line.replace(',', ' ').split() if item.strip())
+    return path_keys
+
+
+def get_skip_path_key_set():
+    """Return hard-coded skip keys plus optional keys from external files."""
+    path_keys = set(skip_path_key_list)
+    path_keys.update(_read_skip_path_key_file(os.environ.get('INTERNNAV_SKIP_PATH_KEYS_FILE')))
+    path_keys.update(_read_skip_path_key_file('logs/skip_path_keys.txt'))
+    return path_keys
 
 fall_path_custom = {
     6558: [-1, 0, 0],

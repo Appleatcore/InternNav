@@ -7,7 +7,7 @@ import msgpack_numpy
 
 from internnav import PROJECT_ROOT_PATH
 from internnav.configs.evaluator import EvalDatasetCfg
-from internnav.env.utils.episode_loader.dataset_utils import load_data
+from internnav.env.utils.episode_loader.dataset_utils import get_skip_path_key_set, load_data
 from internnav.evaluator.utils.config import get_lmdb_path
 
 from .config import Config
@@ -35,6 +35,7 @@ class ResultLogger:
         dataset_type='mp3d',
     ):
         split_map = {}
+        skip_path_key_set = get_skip_path_key_set()
         for split_data_type in split_data_types:
             load_data_map = load_data(
                 base_data_dir,
@@ -49,6 +50,8 @@ class ResultLogger:
                     trajectory_id = path['trajectory_id']
                     episode_id = path['episode_id']
                     path_key = f'{trajectory_id}_{episode_id}'
+                    if path_key in skip_path_key_set:
+                        continue
                     path_key_list.append(path_key)
             split_map[split_data_type] = path_key_list
         return split_map

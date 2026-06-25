@@ -6,6 +6,11 @@ All notable changes to this project will be documented in this file.
 
 Upcoming changes will be tracked in this section.
 
+### Improvements
+- Add external VLN-PE skip-key file support for recovering from stuck InternUtopia/Isaac samples without editing source code.
+- Add a watchdog to the full VLN-PE val-unseen Slurm script to append stale samples to the skip file and restart evaluation.
+- Update the full VLN-PE val-unseen Slurm script to run distributed inference on multiple 3090 GPUs.
+
 ## Changelog of v0.3.1 (2026/02/09)
 ### Highlights
 - Update dataset conversion for InternData-N1 VLN-PE v0.5 format (#288)

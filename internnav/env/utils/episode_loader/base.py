@@ -1,4 +1,4 @@
-from .dataset_utils import load_data, revise_one_data, skip_list
+from .dataset_utils import get_skip_path_key_set, load_data, revise_one_data, skip_list
 
 
 class BasePathKeyEpisodeloader:
@@ -24,6 +24,7 @@ class BasePathKeyEpisodeloader:
         self.path_key_data = {}
         self.path_key_scan = {}
         self.path_key_split = {}
+        skip_path_key_set = get_skip_path_key_set()
         if isinstance(selected_scans, str):
             selected_scans = [selected_scans]
         selected_scans = set(selected_scans) if selected_scans is not None else None
@@ -52,6 +53,8 @@ class BasePathKeyEpisodeloader:
 
                     episode_id = path['episode_id']
                     path_key = f'{trajectory_id}_{episode_id}'
+                    if path_key in skip_path_key_set:
+                        continue
                     path['start_position'] += robot_offset
                     for i, _ in enumerate(path['reference_path']):
                         path['reference_path'][i] += robot_offset

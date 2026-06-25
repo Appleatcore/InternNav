@@ -8,7 +8,7 @@ from internnav.configs.evaluator import (
     TaskCfg,
 )
 
-TASK_NAME = 'test_n1_val_unseen_full_1m'
+TASK_NAME = 'test_n1_val_unseen_full_3m'
 
 eval_cfg = EvalCfg(
     agent=AgentCfg(
@@ -61,7 +61,7 @@ eval_cfg = EvalCfg(
             metric_setting={
                 'type': 'VLNPEMetric',
                 'name': 'VLNPEMetric',
-                'metric_config': {'success_distance': 1.0, 'shortest_to_goal_distance': 999},
+                'metric_config': {'success_distance': 3.0, 'shortest_to_goal_distance': 999},
             },
         ),
         robot_name='h1',
