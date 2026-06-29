@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=internvla_r2r_offline_pref_l8
-#SBATCH --partition=rtx3090-large
-#SBATCH --gres=gpu:rtx3090:8
+#SBATCH --job-name=internvla_r2r_offline_pref_4x_smoke
+#SBATCH --partition=rtx3090
+#SBATCH --nodelist=tr2
+#SBATCH --gres=gpu:rtx3090:4
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=300G
+#SBATCH --mem=110G
 #SBATCH --output=/srv/shared/home/ycl/workspace/InternNav/logs/slurm/%x_%j.out
 #SBATCH --error=/srv/shared/home/ycl/workspace/InternNav/logs/slurm/%x_%j.err
 
@@ -22,19 +23,48 @@ export WANDB_DISABLED="${WANDB_DISABLED:-true}"
 export INTERNVLA_ATTN_IMPLEMENTATION="${INTERNVLA_ATTN_IMPLEMENTATION:-sdpa}"
 export INTERNVLA_SKIP_FINAL_SAVE="${INTERNVLA_SKIP_FINAL_SAVE:-true}"
 
-NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-8}}"
-MASTER_PORT="${MASTER_PORT:-$((RANDOM % 101 + 21001))}"
+find_cuda_home() {
+    local candidate
+    for candidate in \
+        "${CUDA_HOME:-}" \
+        "${CUDA_PATH:-}" \
+        "${CONDA_PREFIX:-}" \
+        "${CONDA_PREFIX:-}/targets/x86_64-linux" \
+        "${CONDA_PREFIX:-}/lib/python3.11/site-packages/nvidia/cuda_nvcc" \
+        /usr/local/cuda \
+        /usr/local/cuda-12.8 \
+        /usr/local/cuda-12 \
+        /usr/local/cuda-13.0; do
+        if [[ -n "${candidate}" && -x "${candidate}/bin/nvcc" ]]; then
+            echo "${candidate}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+if CUDA_HOME_FOUND="$(find_cuda_home)"; then
+    export CUDA_HOME="${CUDA_HOME_FOUND}"
+    export CUDA_PATH="${CUDA_HOME_FOUND}"
+    export PATH="${CUDA_HOME}/bin:${PATH}"
+    export LD_LIBRARY_PATH="${CUDA_HOME}/lib64:${LD_LIBRARY_PATH:-}"
+else
+    echo "[warn] could not find a CUDA_HOME with bin/nvcc before deepspeed import"
+fi
+
+NPROC_PER_NODE="${NPROC_PER_NODE:-${SLURM_GPUS_ON_NODE:-4}}"
+MASTER_PORT="${MASTER_PORT:-$((RANDOM % 101 + 22001))}"
 
 DEEPSPEED_CONFIG="${DEEPSPEED_CONFIG:-scripts/train/qwenvl_train/zero2.json}"
 MODEL_NAME_OR_PATH="${MODEL_NAME_OR_PATH:-checkpoints/InternVLA-N1-DualVLN}"
-VLN_DATASET_USE="${VLN_DATASET_USE:-vln_pe_r2r_offline}"
-RUN_NAME="${RUN_NAME:-InternVLA-N1-VLNPE-OfflinePref-Full-Large8}"
+VLN_DATASET_USE="${VLN_DATASET_USE:-vln_pe_r2r_offline%1}"
+RUN_NAME="${RUN_NAME:-InternVLA-N1-VLNPE-OfflinePref-4x3090-CUDA-Smoke}"
 OUTPUT_DIR="${OUTPUT_DIR:-checkpoints/${RUN_NAME}}"
-MAX_STEPS="${MAX_STEPS:-250}"
+MAX_STEPS="${MAX_STEPS:-1}"
 BATCH_SIZE="${BATCH_SIZE:-1}"
 GRAD_ACCUM_STEPS="${GRAD_ACCUM_STEPS:-1}"
 LR="${LR:-1e-5}"
-SAVE_STEPS="${SAVE_STEPS:-50}"
+SAVE_STEPS="${SAVE_STEPS:-1}"
 OFFLINE_REWARD_PATH="${OFFLINE_REWARD_PATH:-logs/offline_grpo/r2r_offline_grpo_vln_pe_full_1gpu/rewards.jsonl}"
 OFFLINE_REWARD_REDUCE="${OFFLINE_REWARD_REDUCE:-max}"
 
@@ -42,18 +72,17 @@ echo "[job] started at $(date)"
 echo "[job] node=${SLURMD_NODENAME:-unknown}"
 echo "[job] job_id=${SLURM_JOB_ID:-manual}"
 echo "[job] CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
+echo "[job] CUDA_HOME=${CUDA_HOME:-unset}"
 echo "[job] conda_env=${CONDA_DEFAULT_ENV:-unknown}"
 echo "[job] nproc_per_node=${NPROC_PER_NODE}"
 echo "[job] model=${MODEL_NAME_OR_PATH}"
 echo "[job] datasets=${VLN_DATASET_USE}"
 echo "[job] output_dir=${OUTPUT_DIR}"
 echo "[job] max_steps=${MAX_STEPS}"
-echo "[job] save_steps=${SAVE_STEPS}"
-echo "[job] attn=${INTERNVLA_ATTN_IMPLEMENTATION}"
-echo "[job] skip_final_save=${INTERNVLA_SKIP_FINAL_SAVE}"
 echo "[job] offline_reward_path=${OFFLINE_REWARD_PATH}"
-echo "[job] offline_reward_reduce=${OFFLINE_REWARD_REDUCE}"
 nvidia-smi || true
+which nvcc || true
+nvcc -V || true
 
 test -s "${OFFLINE_REWARD_PATH}" || {
     echo "[error] missing OFFLINE_REWARD_PATH: ${OFFLINE_REWARD_PATH}" >&2
@@ -61,14 +90,17 @@ test -s "${OFFLINE_REWARD_PATH}" || {
 }
 
 python - <<'PY'
-import importlib.util
-missing = [
-    name
-    for name in ("pyarrow", "deepspeed")
-    if importlib.util.find_spec(name) is None
-]
-if missing:
-    raise SystemExit(f"missing required dependencies: {', '.join(missing)}")
+import os
+from torch.utils.cpp_extension import CUDA_HOME
+
+print(f"[check] env CUDA_HOME={os.environ.get('CUDA_HOME')}")
+print(f"[check] torch CUDA_HOME={CUDA_HOME}")
+if CUDA_HOME is None:
+    raise SystemExit("CUDA_HOME is None; deepspeed cannot import on this node")
+
+import deepspeed
+
+print(f"[check] deepspeed import ok: {deepspeed.__version__}")
 PY
 
 torchrun --nproc_per_node="${NPROC_PER_NODE}" \
@@ -103,7 +135,7 @@ torchrun --nproc_per_node="${NPROC_PER_NODE}" \
     --eval_strategy "no" \
     --save_strategy "steps" \
     --save_steps "${SAVE_STEPS}" \
-    --save_total_limit 2 \
+    --save_total_limit 1 \
     --learning_rate "${LR}" \
     --weight_decay 0 \
     --warmup_ratio 0.003 \
@@ -113,7 +145,7 @@ torchrun --nproc_per_node="${NPROC_PER_NODE}" \
     --logging_steps 1 \
     --model_max_length 8192 \
     --gradient_checkpointing True \
-    --dataloader_num_workers 4 \
+    --dataloader_num_workers 2 \
     --run_name "${RUN_NAME}" \
     --report_to none
 

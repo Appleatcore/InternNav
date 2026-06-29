@@ -8,12 +8,13 @@
 #SBATCH --output=/srv/shared/home/ycl/workspace/InternNav/logs/slurm/%x_%j.out
 #SBATCH --error=/srv/shared/home/ycl/workspace/InternNav/logs/slurm/%x_%j.err
 
-set -euo pipefail
+set -eo pipefail
 
 cd /srv/shared/home/ycl/workspace/InternNav
 
 source /srv/shared/home/ycl/miniconda3/etc/profile.d/conda.sh
 conda activate "${CONDA_ENV:-env_isaaclab}"
+set -u
 
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-8}"
