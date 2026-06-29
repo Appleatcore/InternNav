@@ -79,6 +79,7 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
         traj_depths: Optional[torch.Tensor] = None,
         video_frame_num: Optional[torch.Tensor] = None,
         traj_poses: Optional[torch.Tensor] = None,
+        traj_reward_weights: Optional[torch.Tensor] = None,
     ) -> Union[Tuple, CausalLMOutputWithPast]:
         r"""
             labels (`torch.LongTensor` of shape `(batch_size, sequence_length)`, *optional*):
@@ -238,6 +239,8 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
                     bsz = cur_images.size(0)
                     images_dp = torch.stack([pix_goal_images, cur_images], dim=1).permute(0, 1, 4, 2, 3)
                     images_dp_norm = (images_dp - self._resnet_mean) / self._resnet_std
+                    rgb_param = next(self.get_model().rgb_model.parameters())
+                    images_dp_norm = images_dp_norm.to(device=rgb_param.device, dtype=rgb_param.dtype)
 
                     images_dp_feat = (
                         self.get_model()
@@ -282,8 +285,11 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
                 target = noise - relative_poses
                 loss = F.mse_loss(noise_pred.float(), target.float(), reduction="none")
                 mask = loss_mask.flatten(0, 1)[:, None, None]
+                if traj_reward_weights is not None:
+                    reward_weights = traj_reward_weights.flatten(0, 1)[:, None, None].to(mask.device, mask.dtype)
+                    mask = mask * reward_weights
                 masked_loss = loss * mask
-                loss = masked_loss.sum() / mask.sum() / (loss.shape[1] * loss.shape[2])
+                loss = masked_loss.sum() / mask.sum().clamp_min(1.0) / (loss.shape[1] * loss.shape[2])
             elif 'navdp' in self.get_system1_type():
                 if 'async' in self.get_system1_type():
                     cur_images = traj_images.flatten(0, 1)
@@ -299,8 +305,11 @@ class InternVLAN1ForCausalLM(Qwen2_5_VLForConditionalGeneration, InternVLAN1Meta
                     )
                     pg_action_loss = (pred_pg - noise).square()
                     mask = loss_mask.flatten(0, 1)[:, None, None]
+                    if traj_reward_weights is not None:
+                        reward_weights = traj_reward_weights.flatten(0, 1)[:, None, None].to(mask.device, mask.dtype)
+                        mask = mask * reward_weights
                     masked_loss = pg_action_loss * mask
-                    loss = masked_loss.sum() / mask.sum() / (pg_action_loss.shape[1] * pg_action_loss.shape[2])
+                    loss = masked_loss.sum() / mask.sum().clamp_min(1.0) / (pg_action_loss.shape[1] * pg_action_loss.shape[2])
 
             else:
                 raise NotImplementedError

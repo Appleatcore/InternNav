@@ -20,6 +20,7 @@ import pathlib
 import sys
 from pathlib import Path
 from typing import Dict
+import json
 
 import torch
 import transformers
@@ -146,7 +147,13 @@ def train(attn_implementation="flash_attention_2"):
     else:
         data_args.transform_train = v2.Resize((data_args.resize_h, data_args.resize_w))
 
-    if 'internvla-n1-system2' in model_args.model_name_or_path.lower():
+    config_path = Path(model_args.model_name_or_path) / "config.json"
+    checkpoint_model_type = None
+    if config_path.exists():
+        with config_path.open("r", encoding="utf-8") as f:
+            checkpoint_model_type = json.load(f).get("model_type")
+
+    if checkpoint_model_type == "internvla_n1" or 'internvla-n1-system2' in model_args.model_name_or_path.lower():
         model = InternVLAN1ForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -215,13 +222,18 @@ def train(attn_implementation="flash_attention_2"):
     else:
         data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = Trainer(model=model, processing_class=tokenizer, args=training_args, **data_module)
-    from tabulate import tabulate
-
     if trainer.is_world_process_zero():
         stat = []
         for i, (n, p) in enumerate(trainer.model.named_parameters()):
             stat.append([i, n, p.shape, p.requires_grad])
-        print(tabulate(stat, headers=["idx", "name", "shape", "trainable"]))
+        try:
+            from tabulate import tabulate
+
+            print(tabulate(stat, headers=["idx", "name", "shape", "trainable"]))
+        except ImportError:
+            print("idx\tname\tshape\ttrainable")
+            for row in stat:
+                print("\t".join(str(item) for item in row))
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         logging.info("checkpoint found, resume training")
         trainer.train(resume_from_checkpoint=True)
@@ -232,8 +244,12 @@ def train(attn_implementation="flash_attention_2"):
 
     model.config.use_cache = True
 
-    safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
+    if os.environ.get("INTERNVLA_SKIP_FINAL_SAVE", "false").lower() in ("1", "true", "yes"):
+        if trainer.is_world_process_zero():
+            print("[train] skip final full-model save because INTERNVLA_SKIP_FINAL_SAVE is enabled")
+    else:
+        safe_save_model_for_hf_trainer(trainer=trainer, output_dir=training_args.output_dir)
 
 
 if __name__ == "__main__":
-    train(attn_implementation="flash_attention_2")
+    train(attn_implementation=os.environ.get("INTERNVLA_ATTN_IMPLEMENTATION", "flash_attention_2"))

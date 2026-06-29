@@ -6,16 +6,25 @@ import random
 import re
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Sequence, Tuple
 
 import numpy as np
 import torch
 import transformers
-from decord import VideoReader
 from PIL import Image
 from torch.utils.data import Dataset
-from torchcodec.decoders import VideoDecoder
 from transformers.image_utils import to_numpy_array
+
+try:
+    from decord import VideoReader
+except Exception:
+    VideoReader = None
+
+try:
+    from torchcodec.decoders import VideoDecoder
+except Exception:
+    VideoDecoder = None
 
 from .rope2d import get_rope_index_2, get_rope_index_25
 from .vlln_lerobot_dataset import VLLNDataset
@@ -124,6 +133,14 @@ SCALEVLN_60CM_30_30 = {
     "pitch_2": 30,
 }
 
+VLN_PE_R2R_OFFLINE = {
+    "data_path": "traj_data/vln_pe_r2r",
+    "height": 60,
+    "pitch_1": 30,
+    "pitch_2": 30,
+    "data_format": "vln_pe_npy",
+}
+
 data_dict = {
     "cambrian_737k": CAMBRIAN_737K,
     "cambrian_737k_pack": CAMBRIAN_737K_PACK,
@@ -141,6 +158,7 @@ data_dict = {
     "scalevln_125cm_0_30": SCALEVLN_125CM_0_30,
     "scalevln_125cm_0_45": SCALEVLN_125CM_0_45,
     "scalevln_60cm_30_30": SCALEVLN_60CM_30_30,
+    "vln_pe_r2r_offline": VLN_PE_R2R_OFFLINE,
 }
 
 
@@ -388,6 +406,8 @@ class LazySupervisedDataset(Dataset):
             print(f"torchcodec attempt failed: {e}")
 
     def video_decord(self, video_file):
+        if VideoReader is None:
+            raise RuntimeError("decord is required to load video samples")
         if not os.path.exists(video_file):
             print(f"File not exist: {video_file}")
         vr = VideoReader(video_file, num_threads=4)
@@ -407,6 +427,8 @@ class LazySupervisedDataset(Dataset):
         return self.process_video_frames(video, frame_idx, video_length)
 
     def video_torchcodec(self, video_file):
+        if VideoDecoder is None:
+            raise RuntimeError("torchcodec is required to load video samples")
         device = "cpu"  # or e.g. "cuda"
         decoder = VideoDecoder(video_file, device=device)
         total_frames = decoder.metadata.num_frames
@@ -648,6 +670,20 @@ def get_trajectory_relative_to_frame(extrinsics, camera_deg=0):
     return relative_xyyaw
 
 
+def get_trajectory_relative_to_pose(poses):
+    poses = np.asarray(poses, dtype=np.float32)
+    ref_xy = poses[0, :2]
+    ref_yaw = poses[0, 2]
+    delta_xy = poses[:, :2] - ref_xy
+    cos_yaw = np.cos(-ref_yaw)
+    sin_yaw = np.sin(-ref_yaw)
+    rot = np.array([[cos_yaw, -sin_yaw], [sin_yaw, cos_yaw]], dtype=np.float32)
+    rel_xy = delta_xy @ rot.T
+    rel_yaw = poses[:, 2] - ref_yaw
+    rel_yaw = (rel_yaw + np.pi) % (2 * np.pi) - np.pi
+    return np.concatenate([rel_xy, rel_yaw[:, None]], axis=-1)
+
+
 from scipy.interpolate import CubicSpline
 
 
@@ -749,7 +785,40 @@ def clip_or_pad(arr, fixed_len):
         return np.concatenate([arr, pad], axis=0)
 
 
-def get_annotations_from_lerobot_data(data_path, setting):
+def make_traj_sample_id(video, ep_id, start_frame_id, end_frame_id):
+    unit_id = Path(video).parents[1].name
+    return f"{unit_id}:ep{int(ep_id):06d}:frames{int(start_frame_id):06d}-{int(end_frame_id):06d}"
+
+
+def load_offline_reward_weights(reward_path, reduce="mean"):
+    if not reward_path:
+        return {}
+    if not os.path.exists(reward_path):
+        raise FileNotFoundError(f"offline reward file not found: {reward_path}")
+
+    grouped = {}
+    with open(reward_path, "r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            record = json.loads(line)
+            sample_id = record["sample_id"]
+            grouped.setdefault(sample_id, []).append(float(record.get("loss_weight", 1.0)))
+
+    weights = {}
+    for sample_id, values in grouped.items():
+        values = np.asarray(values, dtype=np.float32)
+        if reduce == "max":
+            weight = float(values.max())
+        elif reduce == "min":
+            weight = float(values.min())
+        else:
+            weight = float(values.mean())
+        weights[sample_id] = max(0.0, weight)
+    return weights
+
+
+def get_annotations_from_lerobot_data(data_path, setting, data_format=None):
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     import pyarrow.parquet as pq
@@ -760,21 +829,61 @@ def get_annotations_from_lerobot_data(data_path, setting):
     }
     scene_ids = [d for d in os.listdir(data_path) if os.path.isdir(os.path.join(data_path, d))]
 
-    def process_scene(scene_id):
+    def iter_lerobot_units(scene_id):
         scene_path = os.path.join(data_path, scene_id)
-        episodes = read_jsonl(os.path.join(scene_path, "meta", "episodes.jsonl"))
-        scene_annotations = []
+        if os.path.exists(os.path.join(scene_path, "meta", "episodes.jsonl")):
+            return [(scene_id, scene_path)]
+
+        units = []
+        for child_id in sorted(os.listdir(scene_path)):
+            child_path = os.path.join(scene_path, child_id)
+            if os.path.exists(os.path.join(child_path, "meta", "episodes.jsonl")):
+                units.append((f"{scene_id}__{child_id}", child_path))
+        return units
+
+    def process_unit(unit_id, unit_path):
+        episodes = read_jsonl(os.path.join(unit_path, "meta", "episodes.jsonl"))
+        unit_annotations = []
 
         for ep in episodes:
-            ep_id = ep["episode_index"]
-            ep_instructions = ep["tasks"][0].split("<INSTRUCTION_SEP>")
-            ep_len = ep["length"]
+            ep_id = ep.get("episode_index", 0)
+            ep_instructions = ep.get("tasks", [ep.get("instruction_text", "")])[0].split("<INSTRUCTION_SEP>")
             parquet_path = os.path.join(
-                scene_path, "data", f"chunk-{ep_id // 1000:03d}", f"episode_{ep_id:06d}.parquet"
+                unit_path, "data", f"chunk-{ep_id // 1000:03d}", f"episode_{ep_id:06d}.parquet"
             )
 
             table = pq.read_table(parquet_path)
             df = table.to_pandas()
+            ep_len = ep.get("length", len(df))
+
+            if data_format == "vln_pe_npy":
+                required_columns = [
+                    "observation.robot_position",
+                    "observation.robot_yaw",
+                    "observation.action",
+                ]
+                if not all(column in df.columns for column in required_columns):
+                    print(f"Warning: Missing VLN-PE offline trajectory columns in {unit_id}.")
+                    continue
+
+                positions = [np.asarray(x).tolist() for x in df["observation.robot_position"].tolist()]
+                yaws = df["observation.robot_yaw"].tolist()
+                poses = [[float(pos[0]), float(pos[1]), float(yaw)] for pos, yaw in zip(positions, yaws)]
+                ep_actions = df["observation.action"].tolist()
+                for ep_instruction in ep_instructions:
+                    unit_annotations.append(
+                        {
+                            "id": ep_id,
+                            "video": f"{unit_path}/videos/chunk-{ep_id // 1000:03d}",
+                            "instructions": ep_instruction,
+                            "actions": ep_actions,
+                            "length": ep_len,
+                            f"poses_{setting}": poses,
+                            "pixel_goals": None,
+                            "offline_traj_only": True,
+                        }
+                    )
+                continue
 
             ep_actions = df["action"].tolist()
 
@@ -789,21 +898,32 @@ def get_annotations_from_lerobot_data(data_path, setting):
                 ]
             else:
                 print(f"Warning: Missing data for setting {setting} in episode {ep_id}, filling with defaults.")
+                ep_poses = [[0.0, 0.0, 0.0] for _ in range(len(df))]
+                ep_pixel_goals = [[-1, [0, 0]] for _ in range(len(df))]
 
             assert len(ep_actions) == ep_len, f"Action length mismatch in episode {ep_id}"
 
             for ep_instruction in ep_instructions:
                 episode = {
                     "id": ep_id,
-                    "video": f"{data_path}/{scene_id}/videos/chunk-{ep_id // 1000:03d}",
+                    "video": f"{unit_path}/videos/chunk-{ep_id // 1000:03d}",
                     "instructions": ep_instruction,
                     "actions": ep_actions,
                     "length": ep_len,
                     f"poses_{setting}": ep_poses,
                     "pixel_goals": ep_pixel_goals,
                 }
-                scene_annotations.append(episode)
+                unit_annotations.append(episode)
 
+        return unit_annotations
+
+    def process_scene(scene_id):
+        scene_annotations = []
+        for unit_id, unit_path in iter_lerobot_units(scene_id):
+            try:
+                scene_annotations.extend(process_unit(unit_id, unit_path))
+            except Exception as e:
+                print(f"Error processing unit {unit_id}: {e}")
         return scene_annotations
 
     with ThreadPoolExecutor(max_workers=4) as executor:
@@ -837,6 +957,12 @@ class NavPixelGoalDataset(Dataset):
         self.predict_step_num = data_args.predict_step_num
         self.pixel_goal_only = data_args.pixel_goal_only
         self.num_future_steps = data_args.num_future_steps
+        self.offline_reward_weights = load_offline_reward_weights(
+            getattr(data_args, "offline_reward_path", None),
+            reduce=getattr(data_args, "offline_reward_reduce", "mean"),
+        )
+        if self.offline_reward_weights:
+            print(f"Loaded {len(self.offline_reward_weights)} offline reward weights.")
 
         self.list_data_dict = []
 
@@ -845,10 +971,11 @@ class NavPixelGoalDataset(Dataset):
             height = data.get("height", None)
             pitch_1 = data.get("pitch_1", None)
             pitch_2 = data.get("pitch_2", None)
+            data_format = data.get("data_format", None)
 
             data_path = data['data_path']
             setting = f'{height}cm_{pitch_2}deg'
-            annotations = get_annotations_from_lerobot_data(data_path, setting)
+            annotations = get_annotations_from_lerobot_data(data_path, setting, data_format=data_format)
 
             pixel_goal_list = []
             turn_list = []
@@ -864,6 +991,27 @@ class NavPixelGoalDataset(Dataset):
 
                 actions_len = len(actions)
                 if actions_len < 4:
+                    continue
+
+                if item.get("offline_traj_only", False):
+                    for start_frame_id in range(0, actions_len - 3, self.sample_step):
+                        goal_len = min(actions_len - start_frame_id - 1, max(self.num_future_steps, 4))
+                        if goal_len < 3:
+                            continue
+                        pixel_goal_list.append(
+                            (
+                                ep_id,
+                                data_path,
+                                video,
+                                height,
+                                pitch_1,
+                                pitch_2,
+                                instruction,
+                                (start_frame_id, start_frame_id + goal_len + 1),
+                                [128, 128],
+                                poses[start_frame_id : start_frame_id + goal_len + 1],
+                            )
+                        )
                     continue
 
                 num_rounds = actions_len // self.sample_step
@@ -987,6 +1135,61 @@ class NavPixelGoalDataset(Dataset):
         img[img > 5.0] = 5.0
         return img, (target_width, target_height)
 
+    def resolve_frame_path(self, video, ep_id, frame_id, height, pitch):
+        candidates = [
+            os.path.join(
+                video,
+                f"observation.images.rgb.{height}cm_{pitch}deg",
+                f"episode_{ep_id:06d}_{frame_id}.jpg",
+            ),
+            os.path.join(video, "observation.images.rgb", f"{frame_id:03d}.jpg"),
+            os.path.join(video, "observation.images.rgb", f"episode_{ep_id:06d}_{frame_id}.jpg"),
+            os.path.join(video, "observation.images.rgb", f"{frame_id}.jpg"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        raise FileNotFoundError(
+            f"cannot find RGB frame for episode={ep_id}, frame={frame_id}, height={height}, pitch={pitch}, video={video}"
+        )
+
+    def resolve_depth_path(self, image_file, height, pitch):
+        candidates = [
+            image_file.replace(f"_{pitch}deg", f"_{pitch}deg").replace("rgb", "depth").replace(".jpg", ".png"),
+            image_file.replace("observation.images.rgb", "observation.images.depth").replace(".jpg", ".png"),
+        ]
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    def load_rgb_image(self, video, ep_id, frame_id, height, pitch):
+        rgb_npy = os.path.join(video, "observation.images.rgb", "rgb.npy")
+        if os.path.exists(rgb_npy):
+            rgb = np.load(rgb_npy, mmap_mode="r")[frame_id]
+            return Image.fromarray(np.asarray(rgb).astype(np.uint8)).convert("RGB")
+
+        image_file = self.resolve_frame_path(video, ep_id, frame_id, height, pitch)
+        return Image.open(image_file).convert('RGB')
+
+    def load_depth_tensor(self, video, lookdown_file, frame_id, height, pitch):
+        depth_npy = os.path.join(video, "observation.images.depth", "depth.npy")
+        if os.path.exists(depth_npy):
+            depth = np.asarray(np.load(depth_npy, mmap_mode="r")[frame_id], dtype=np.float32).copy()
+            depth = torch.as_tensor(depth).float().unsqueeze(0).unsqueeze(0)
+            depth = torch.nn.functional.interpolate(depth, size=(224, 224), mode="nearest").squeeze(0).squeeze(0)
+            depth[depth > 5.0] = 5.0
+            return depth
+
+        depth_file = self.resolve_depth_path(lookdown_file, height, pitch) if lookdown_file is not None else None
+        if depth_file is not None:
+            depth_image = Image.open(depth_file)
+            depth_image, resize_shape = self.preprocess_depth_image_v2(
+                depth_image, do_depth_scale=True, depth_scale=1000, target_height=224, target_width=224
+            )
+            return torch.as_tensor(np.ascontiguousarray(depth_image)).float()
+        return torch.zeros((224, 224), dtype=torch.float32)
+
     def __getitem__(self, i):
         (
             ep_id,
@@ -1000,6 +1203,7 @@ class NavPixelGoalDataset(Dataset):
             action,
             pose,
         ) = self.list_data_dict[i]
+        sample_id = make_traj_sample_id(video, ep_id, start_frame_id, end_frame_id)
         if start_frame_id != 0:
             history_id = np.unique(np.linspace(0, start_frame_id - 1, self.num_history, dtype=np.int32)).tolist()
         else:
@@ -1011,20 +1215,14 @@ class NavPixelGoalDataset(Dataset):
         traj_depths = []  # optional
 
         for id in range(0, end_frame_id):
-            image_file = os.path.join(
-                video, f"observation.images.rgb.{height}cm_{pitch_1}deg", f"episode_{ep_id:06d}_{id}.jpg"
-            )
-            image = Image.open(image_file).convert('RGB')
-            lookdown_image = Image.open(image_file.replace(f'_{pitch_1}deg', f'_{pitch_2}deg')).convert('RGB')
-
-            depth_image = Image.open(
-                image_file.replace(f'_{pitch_1}deg', f'_{pitch_2}deg').replace('rgb', 'depth').replace('.jpg', '.png')
-            )
-
-            depth_image, resize_shape = self.preprocess_depth_image_v2(
-                depth_image, do_depth_scale=True, depth_scale=1000, target_height=224, target_width=224
-            )
-            depth_image = torch.as_tensor(np.ascontiguousarray(depth_image)).float()  # [H, W]
+            image = self.load_rgb_image(video, ep_id, id, height, pitch_1)
+            try:
+                lookdown_file = self.resolve_frame_path(video, ep_id, id, height, pitch_2)
+                lookdown_image = Image.open(lookdown_file).convert('RGB')
+            except FileNotFoundError:
+                lookdown_file = None
+                lookdown_image = image
+            depth_image = self.load_depth_tensor(video, lookdown_file, id, height, pitch_2)
             if id in history_id or id == start_frame_id:
                 if self.data_args.transform_train is not None:
                     image = self.data_args.transform_train(image)
@@ -1118,8 +1316,12 @@ class NavPixelGoalDataset(Dataset):
                 frame_ids = np.arange(0, goal_len, interval)
 
             traj_poses_gt = []
+            pose_array = np.asarray(pose)
             for cid in frame_ids:
-                discrete_traj_pose = get_trajectory_relative_to_frame(pose[cid:], camera_deg=pitch_2)
+                if pose_array.ndim == 2 and pose_array.shape[-1] == 3:
+                    discrete_traj_pose = get_trajectory_relative_to_pose(pose_array[cid:])
+                else:
+                    discrete_traj_pose = get_trajectory_relative_to_frame(pose[cid:], camera_deg=pitch_2)
                 rel_trajectory, rel_pose_resample = interpolate_and_resample_trajectory(
                     discrete_traj_pose, self.predict_step_num
                 )
@@ -1129,6 +1331,11 @@ class NavPixelGoalDataset(Dataset):
             data_dict["traj_images"] = traj_images[:goal_len][::interval]
             data_dict["traj_depths"] = torch.stack(traj_depths[:goal_len][::interval])
             data_dict["traj_poses"] = torch.stack(traj_poses_gt)
+            data_dict["sample_id"] = sample_id
+            if sample_id in self.offline_reward_weights:
+                data_dict["traj_reward_weights"] = torch.full(
+                    (len(frame_ids),), self.offline_reward_weights[sample_id], dtype=torch.float32
+                )
         return data_dict
 
 
@@ -1275,6 +1482,16 @@ class DataCollatorForSupervisedDataset(object):
             batch['traj_depths'] = torch.stack(traj_depth_batch)
             batch['traj_poses'] = torch.stack(traj_pose_batch)
             batch['video_frame_num'] = torch.tensor(video_frame_num)
+            if "traj_reward_weights" in instances[0]:
+                reward_weights = []
+                for idx, instance in enumerate(instances):
+                    weights = instance["traj_reward_weights"]
+                    n_frames = weights.shape[0]
+                    if n_frames < max_len:
+                        pad_len = max_len - n_frames
+                        weights = torch.cat([weights, weights[-1:].repeat(pad_len)], dim=0)
+                    reward_weights.append(weights)
+                batch["traj_reward_weights"] = torch.stack(reward_weights)
 
         return batch
 
