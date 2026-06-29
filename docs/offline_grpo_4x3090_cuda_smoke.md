@@ -339,3 +339,46 @@ The 4-GPU epyc3 smoke could not start because Slurm marked `epyc3` unavailable f
 ```
 
 No training logs or checkpoint were produced for this attempt. The 4-GPU epyc3 smoke still needs to be retried after `epyc3` is out of DRAIN, or on another non-`tr2` RTX3090 node with four available GPUs.
+
+## 4-GPU tr2 No-Save Retry
+
+### Job 5061: tr2, 4 GPUs, local cache, no checkpoint save
+
+Command shape:
+
+```bash
+sbatch --nodelist=tr2 \
+  --gres=gpu:rtx3090:4 \
+  --export=ALL,NPROC_PER_NODE=4,RUN_NAME=InternVLA-N1-VLNPE-OfflinePref-4x3090-Tr2-NoSave-Retry,OUTPUT_DIR=checkpoints/InternVLA-N1-VLNPE-OfflinePref-4x3090-Tr2-NoSave-Retry,TRITON_CACHE_DIR=/tmp/ycl_triton_cache_4x_tr2_retry,TORCH_EXTENSIONS_DIR=/tmp/ycl_torch_extensions_4x_tr2_retry,PYTHONPYCACHEPREFIX=/tmp/ycl_pycache_4x_tr2_retry,PYTHONFAULTHANDLER=1,NCCL_DEBUG=INFO,SAVE_STEPS=999,INTERNVLA_SKIP_FINAL_SAVE=true \
+  scripts/train/qwenvl_train/slurm_train_dual_system_r2r_offline_pref_4x3090_smoke.sbatch
+```
+
+Result:
+
+```text
+5061 CANCELLED by 1013 after 00:07:33
+node=tr2
+CUDA_VISIBLE_DEVICES=0,1,2,3
+nproc_per_node=4
+```
+
+Positive checks:
+
+```text
+CUDA_HOME=/srv/shared/home/ycl/miniconda3/envs/env_isaaclab
+Loaded checkpoint shards
+NCCL init complete for ranks 0..3
+Completed 1/1 train step
+{'loss': 0.9493, 'grad_norm': 44.997562408447266, 'learning_rate': 0.0, 'epoch': 0.25}
+```
+
+The previous tr2 4-GPU `SIGBUS` did not reproduce in this retry when using local `/tmp` cache and no checkpoint save. The training step completed successfully.
+
+The process did not exit cleanly after the step, so it was manually cancelled to free the four GPUs. The current remaining issue is therefore cleanup/exit behavior after training, not basic 4-GPU forward/backward execution.
+
+The output directory remained tiny, as expected for no-save smoke:
+
+```text
+checkpoints/InternVLA-N1-VLNPE-OfflinePref-4x3090-Tr2-NoSave-Retry
+4.0K
+```
