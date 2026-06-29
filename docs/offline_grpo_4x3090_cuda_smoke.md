@@ -303,3 +303,39 @@ Updated recommendation:
 2. Prefer `epyc3` or another non-`tr2` normal `rtx3090` node for the next smoke.
 3. Keep `TRITON_CACHE_DIR`, `TORCH_EXTENSIONS_DIR`, and `PYTHONPYCACHEPREFIX` on node-local `/tmp`.
 4. Disable final save for pure smoke tests, or add an explicit timeout around cleanup, because `epyc3` completed the train step but hung during final exit.
+
+## 4-GPU epyc3 Follow-up
+
+### Job 5060: epyc3, 4 GPUs
+
+Command shape:
+
+```bash
+sbatch --nodelist=epyc3 \
+  --gres=gpu:rtx3090:4 \
+  --export=ALL,NPROC_PER_NODE=4,RUN_NAME=InternVLA-N1-VLNPE-OfflinePref-4x3090-Epyc3-Smoke,OUTPUT_DIR=checkpoints/InternVLA-N1-VLNPE-OfflinePref-4x3090-Epyc3-Smoke,TRITON_CACHE_DIR=/tmp/ycl_triton_cache_4x_epyc3,TORCH_EXTENSIONS_DIR=/tmp/ycl_torch_extensions_4x_epyc3,PYTHONPYCACHEPREFIX=/tmp/ycl_pycache_4x_epyc3,PYTHONFAULTHANDLER=1,NCCL_DEBUG=INFO,SAVE_STEPS=999 \
+  scripts/train/qwenvl_train/slurm_train_dual_system_r2r_offline_pref_4x3090_smoke.sbatch
+```
+
+Result:
+
+```text
+5060 PENDING
+Reason: ReqNodeNotAvail, UnavailableNodes:epyc3
+```
+
+Node state at submission time:
+
+```text
+epyc3 State=MIXED+DRAIN
+Reason=Kill task failed
+AllocTRES=cpu=48,mem=128G,gres/gpu=4
+```
+
+The 4-GPU epyc3 smoke could not start because Slurm marked `epyc3` unavailable for new allocations. The job was cancelled to avoid keeping a pending job against the submit quota:
+
+```text
+5060 CANCELLED by 1013
+```
+
+No training logs or checkpoint were produced for this attempt. The 4-GPU epyc3 smoke still needs to be retried after `epyc3` is out of DRAIN, or on another non-`tr2` RTX3090 node with four available GPUs.
