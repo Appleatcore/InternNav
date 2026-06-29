@@ -182,3 +182,124 @@ Recommended next checks:
 1. Try a 1-GPU normal `rtx3090` smoke to separate single-process training issues from distributed multi-process issues.
 2. Put DeepSpeed/Triton temporary cache on a node-local path instead of NFS.
 3. If the crash persists, test whether copying the checkpoint to node-local storage before launch avoids shared-filesystem mmap/SIGBUS issues.
+
+## 1-GPU Follow-up
+
+### Job 5055: tr2, default cache
+
+Result:
+
+```text
+FAILED, elapsed 00:00:07, node tr2
+CUDA_VISIBLE_DEVICES=0
+nproc_per_node=1
+CUDA_HOME=/srv/shared/home/ycl/miniconda3/envs/env_isaaclab
+```
+
+Failure:
+
+```text
+Bus error during preflight import deepspeed
+```
+
+This failed before entering `torchrun`.
+
+### Job 5056: tr2, local Triton/Torch cache
+
+Result:
+
+```text
+FAILED, elapsed 00:00:18, node tr2
+CUDA_VISIBLE_DEVICES=0
+nproc_per_node=1
+TRITON_CACHE_DIR=/tmp/ycl_triton_cache_5056
+TORCH_EXTENSIONS_DIR=/tmp/ycl_torch_extensions_5056
+[check] deepspeed import ok: 0.19.2
+rank 0 local_rank 0 exitcode -7
+Signal 7 (SIGBUS)
+```
+
+Local Triton/Torch cache fixed the preflight `deepspeed import` in this attempt, but the trainer still crashed with `SIGBUS` after `torchrun` started.
+
+### Job 5057: tr2, faulthandler
+
+Result:
+
+```text
+FAILED, elapsed 00:00:08, node tr2
+```
+
+`PYTHONFAULTHANDLER=1` showed the `SIGBUS` happened during Python import of DeepSpeed/TorchDynamo/SymPy bytecode/source:
+
+```text
+Fatal Python error: Bus error
+...
+importlib._bootstrap_external._compile_bytecode
+sympy/printing/__init__.py
+torch/_dynamo
+deepspeed/runtime/compiler.py
+```
+
+### Job 5058: tr2, local pycache
+
+Result:
+
+```text
+FAILED, elapsed 00:00:12, node tr2
+PYTHONPYCACHEPREFIX=/tmp/ycl_pycache_5058
+```
+
+Failure was still during `import deepspeed`, but the stack moved to source compilation:
+
+```text
+Fatal Python error: Bus error
+...
+importlib._bootstrap_external.source_to_code
+torch/onnx/symbolic_caffe2.py
+torch/_dynamo
+deepspeed/comm
+```
+
+This suggests the `tr2` failures are not only from Python writing cache files. They are consistent with unstable source/bytecode reads from the shared environment or node-specific filesystem behavior.
+
+### Job 5059: epyc3, local cache and local pycache
+
+Result:
+
+```text
+CANCELLED after elapsed 00:06:21, node epyc3
+CUDA_VISIBLE_DEVICES=0
+nproc_per_node=1
+TRITON_CACHE_DIR=/tmp/ycl_triton_cache_5059
+TORCH_EXTENSIONS_DIR=/tmp/ycl_torch_extensions_5059
+PYTHONPYCACHEPREFIX=/tmp/ycl_pycache_5059
+```
+
+Positive checks:
+
+```text
+[check] deepspeed import ok: 0.19.2
+Loaded checkpoint shards
+Completed 1/1 train step
+{'loss': 1.0573, 'grad_norm': 69.89163970947266, 'learning_rate': 0.0, 'epoch': 0.06}
+```
+
+Output:
+
+```text
+checkpoints/InternVLA-N1-VLNPE-OfflinePref-1x3090-Epyc3-Smoke/checkpoint-1
+16G total
+model-00001-of-00004.safetensors
+model-00002-of-00004.safetensors
+model-00003-of-00004.safetensors
+model-00004-of-00004.safetensors
+```
+
+The training step and checkpoint save succeeded on `epyc3`, but the process did not exit cleanly after several minutes of no new output, so it was manually cancelled to free the GPU. This means the normal `rtx3090` path is usable for at least a 1-GPU training step on `epyc3`, while `tr2` appears unreliable for this Python/DeepSpeed import/runtime path.
+
+Updated recommendation:
+
+1. Avoid `tr2` for offline GRPO training until its SIGBUS/import behavior is understood.
+2. Prefer `epyc3` or another non-`tr2` normal `rtx3090` node for the next smoke.
+3. Keep `TRITON_CACHE_DIR`, `TORCH_EXTENSIONS_DIR`, and `PYTHONPYCACHEPREFIX` on node-local `/tmp`.
+4. Disable final save for pure smoke tests, or add an explicit timeout around cleanup, because `epyc3` completed the train step but hung during final exit.
