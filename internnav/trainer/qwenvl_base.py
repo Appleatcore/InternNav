@@ -1,6 +1,7 @@
 from typing import Optional
 
 import torch
+from flash_attn.flash_attn_interface import flash_attn_varlen_func
 from transformers import Trainer
 from transformers.cache_utils import Cache
 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
@@ -12,11 +13,6 @@ from transformers.models.qwen2_vl.modeling_qwen2_vl import (
     Qwen2VLModel,
 )
 from transformers.trainer import ALL_LAYERNORM_LAYERS, get_parameter_names
-
-try:
-    from flash_attn.flash_attn_interface import flash_attn_varlen_func
-except Exception:
-    flash_attn_varlen_func = None
 
 
 def _flash_attention_forward(
@@ -120,9 +116,6 @@ def _update_causal_mask(
 
 
 def replace_qwen2_vl_attention_class():
-    if flash_attn_varlen_func is None:
-        raise RuntimeError("flash_attn is required when data_flatten=True replaces Qwen2-VL attention")
-
     import transformers
     import transformers.modeling_flash_attention_utils
 
